@@ -1,0 +1,16 @@
+# model artifacts and datasets: never commit these
+*.pt
+*.bin
+*.safetensors
+*.log
+data/
+.env
+
+# local/runtime noise
+.venv/
+__pycache__/
+*.py[cod]
+*.jsonl
+runs/
+checkpoints/
+.DS_Store

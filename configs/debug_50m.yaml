@@ -1,0 +1,46 @@
+# ~45M-parameter local RTX 3090 smoke configuration.
+model:
+  layout: passchain40
+  vocab_size: 49152
+  mask_token_id: 16
+  d_model: 256
+  n_layers: 6
+  n_heads: 4
+  n_kv_heads: 2
+  head_dim: 64
+  d_ff_dense: 768
+  moe_first_layer: 1
+  d_ff_expert: 192
+  top_k: 6
+  experts_per_phase: 16
+  n_phases: 4
+  block_size: 64
+  n_blocks: 8
+  qk_norm: true
+  z_loss_weight: 0.0001
+  fp8: false
+  tie_embeddings: true
+  moe_impl: auto
+
+data:
+  synthetic: true
+
+training:
+  total_tokens: 1000000
+  global_batch_seqs: 8
+  micro_batch: 2
+  lr_muon: 0.02
+  lr_adamw: 0.0003
+  weight_decay: 0.1
+  grad_clip: 1.0
+  muon_momentum: 0.95
+  muon_ns_steps: 5
+  warmup_frac: 0.02
+  decay_frac: 0.15
+  phase: stable
+  compile: false
+  seed: 42
+  log_interval: 1
+  save_every_minutes: 0
+  save_every_steps: 10
+  out_dir: runs/debug_50m
