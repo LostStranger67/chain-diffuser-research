@@ -2,20 +2,22 @@
 """Build streaming uint16 shards for the Python-heavy PassChain mix.
 
 Default mix: 70% permissive Python, 20% FineWeb-Edu, 10% OpenMathInstruct.
-Every document gets an EOS token; the writer packs tokens contiguously so the
-training loader can read exact 2048-token windows with no padding.
+Documents are tokenized by a multiprocessing pool; every document gets EOS;
+shards are contiguous and padded only by the final partial shard.
 
 Usage:
   python scripts/prepare_data.py --out_dir /data/python_mix \
-      --train_tokens 17000000000
+      --train_tokens 17000000000 --num_proc 8
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Sequence
 
@@ -27,6 +29,10 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 TOKENIZER = "HuggingFaceTB/SmolLM2-135M"
 VOCAB_SIZE = 49152
 EOS_ID = 0
+DEFAULT_HF_DATA_REPO = "LostStranger67/passchain-python-shards"
+
+_WORKER_TOK = None
+_WORKER_EOS = EOS_ID
 
 
 @dataclass
@@ -76,58 +82,77 @@ def iter_docs(src: Source) -> Iterator[str]:
             yield doc
 
 
-class DomainStream:
-    def __init__(self, src: Source, tok, eos_id: int, batch_docs: int = 256):
-        self.src, self.tok, self.eos_id = src, tok, eos_id
+def _init_worker(tokenizer: str, eos_id: int) -> None:
+    global _WORKER_TOK, _WORKER_EOS
+    from transformers import AutoTokenizer
+
+    _WORKER_TOK = AutoTokenizer.from_pretrained(tokenizer, use_fast=True)
+    _WORKER_EOS = int(eos_id)
+
+
+def _tokenize_batch(docs: List[str]) -> List[np.ndarray]:
+    """Worker: tokenize one document batch and append EOS to every document."""
+    enc = _WORKER_TOK(docs, add_special_tokens=False)["input_ids"]
+    out: List[np.ndarray] = []
+    for ids in enc:
+        if ids:
+            arr = np.empty(len(ids) + 1, dtype=np.uint16)
+            arr[:-1] = np.asarray(ids, dtype=np.uint16)
+            arr[-1] = _WORKER_EOS
+            out.append(arr)
+    return out
+
+
+class BatchDocStream:
+    """Round-robin document batches weighted by the requested domain shares."""
+
+    def __init__(self, sources: List[Source], batch_docs: int = 512):
+        self.sources = sources
         self.batch_docs = batch_docs
-        self.docs = iter_docs(src)
-        self.buf = np.empty(0, dtype=np.uint16)
-        self.done = False
-        self.emitted = 0
-        self.n_docs = 0
+        self.iters = {s.name: iter_docs(s) for s in sources}
+        self.done = set()
 
-    def _refill(self) -> None:
-        if self.done:
-            return
-        batch: List[str] = []
-        try:
-            for _ in range(self.batch_docs):
-                batch.append(next(self.docs))
-        except StopIteration:
-            self.done = True
-        if not batch:
-            return
-        enc = self.tok(batch, add_special_tokens=False)["input_ids"]
-        parts: List[np.ndarray] = []
-        for ids in enc:
-            if ids:
-                parts.append(np.asarray(ids, dtype=np.uint16))
-                parts.append(np.asarray([self.eos_id], dtype=np.uint16))
-        if parts:
-            self.buf = np.concatenate([self.buf] + parts)
-        self.n_docs += len(batch)
-
-    def take(self, n: int) -> np.ndarray:
-        while self.buf.size < n and not self.done:
-            self._refill()
-        if self.buf.size < n:
-            raise RuntimeError(
-                f"{self.src.name} exhausted after {self.emitted:,} tokens; requested {n:,}"
-            )
-        out = self.buf[:n]
-        self.buf = self.buf[n:]
-        self.emitted += n
-        return out
+    def batches(self) -> Iterator[List[str]]:
+        while len(self.done) < len(self.sources):
+            for s in self.sources:
+                if s.name in self.done:
+                    continue
+                n = max(1, int(round(self.batch_docs * s.share)))
+                docs: List[str] = []
+                try:
+                    for _ in range(n):
+                        docs.append(next(self.iters[s.name]))
+                except StopIteration:
+                    self.done.add(s.name)
+                if docs:
+                    yield docs
 
 
 class ShardWriter:
-    def __init__(self, out_dir: str, prefix: str, shard_tokens: int):
+    def __init__(self, out_dir: str, prefix: str, shard_tokens: int,
+                 hf_repo_id: str | None = None, upload: bool = True,
+                 start_idx: int = 0, existing_files: Sequence[str] = (),
+                 existing_tokens: int = 0):
         self.out_dir, self.prefix, self.shard_tokens = out_dir, prefix, shard_tokens
         self.parts: List[np.ndarray] = []
         self.buffered = 0
-        self.idx = 0
-        self.files: List[str] = []
-        self.total_tokens = 0
+        self.idx = start_idx
+        self.files: List[str] = list(existing_files)
+        self.total_tokens = int(existing_tokens)
+        self.hf_repo_id = hf_repo_id
+        self.hf_api = None
+        self.upload = upload
+        if upload and hf_repo_id:
+            try:
+                from huggingface_hub import HfApi
+
+                self.hf_api = HfApi()
+                self.hf_api.create_repo(repo_id=hf_repo_id, repo_type="dataset",
+                                        private=False, exist_ok=True)
+                print(f"[prepare] HF shard upload -> {hf_repo_id}", flush=True)
+            except Exception as exc:
+                print(f"[prepare] HF upload disabled ({exc})", flush=True)
+                self.hf_api = None
 
     def write(self, arr: np.ndarray) -> None:
         self.parts.append(arr)
@@ -146,6 +171,17 @@ class ShardWriter:
         self.files.append(name)
         self.total_tokens += int(arr.size)
         print(f"  wrote {name} ({arr.size:,} tokens)", flush=True)
+        if self.hf_api is not None:
+            try:
+                self.hf_api.upload_file(
+                    path_or_fileobj=path,
+                    path_in_repo=f"python_mix/{name}",
+                    repo_id=self.hf_repo_id,
+                    repo_type="dataset",
+                )
+                print(f"  uploaded {name} -> {self.hf_repo_id}", flush=True)
+            except Exception as exc:
+                print(f"  upload failed for {name}: {exc}", flush=True)
         self.idx += 1
 
     def close(self) -> int:
@@ -160,8 +196,11 @@ def main() -> None:
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--train_tokens", type=int, default=17_000_000_000)
     ap.add_argument("--shard_tokens", type=int, default=50_000_000)
-    ap.add_argument("--block_tokens", type=int, default=100_000)
+    ap.add_argument("--batch_docs", type=int, default=512)
+    ap.add_argument("--num_proc", type=int, default=8)
     ap.add_argument("--tokenizer", default=TOKENIZER)
+    ap.add_argument("--hf_repo_id", default=DEFAULT_HF_DATA_REPO)
+    ap.add_argument("--no_upload", action="store_true")
     ap.add_argument("--python_dataset", default="codeparrot/codeparrot-clean",
                     help="replace with bigcode/the-stack-v2-dedup or starcoderdata if you have access")
     ap.add_argument("--fineweb_dataset", default="HuggingFaceFW/fineweb-edu")
@@ -180,27 +219,53 @@ def main() -> None:
     total_share = sum(s.share for s in sources)
     if abs(total_share - 1.0) > 1e-9:
         raise SystemExit(f"mix shares must sum to 1.0, got {total_share}")
-    streams = {s.name: DomainStream(s, tok, eos_id) for s in sources}
-    writer = ShardWriter(args.out_dir, "train", args.shard_tokens)
-    written = 0
+
+    existing = sorted(glob.glob(os.path.join(args.out_dir, "train_*.bin")))
+    existing_tokens = sum(os.path.getsize(p) // 2 for p in existing)
+    start_idx = len(existing)
+    writer = ShardWriter(
+        args.out_dir, "train", args.shard_tokens,
+        hf_repo_id=args.hf_repo_id, upload=not args.no_upload,
+        start_idx=start_idx, existing_files=[os.path.basename(p) for p in existing],
+        existing_tokens=existing_tokens,
+    )
+    stream = BatchDocStream(sources, args.batch_docs)
+    written = existing_tokens
+    if written >= args.train_tokens:
+        print(f"[prepare] already have {written:,} tokens; nothing to do", flush=True)
+        writer.close()
+        return
     t0 = time.time()
-    print(f"[prepare] tokenizer={args.tokenizer} vocab={tok.vocab_size} eos={eos_id}")
-    while written < args.train_tokens:
-        need = args.train_tokens - written
-        block = min(args.block_tokens, need)
-        parts = []
-        for s in sources:
-            n = min(int(round(block * s.share)), args.train_tokens - written - sum(p.size for p in parts))
-            if n > 0:
-                parts.append(streams[s.name].take(n))
-        if not parts:
-            break
-        arr = np.concatenate(parts)
-        writer.write(arr)
-        written += arr.size
-        if written // 1_000_000_000 != (written - arr.size) // 1_000_000_000:
-            print(f"[prepare] {written/1e9:.2f}B / {args.train_tokens/1e9:.2f}B tokens "
-                  f"({time.time()-t0:.0f}s)", flush=True)
+    print(
+        f"[prepare] tokenizer={args.tokenizer} vocab={tok.vocab_size} eos={eos_id} "
+        f"num_proc={args.num_proc} target={args.train_tokens:,}",
+        flush=True,
+    )
+    with ProcessPoolExecutor(
+        max_workers=max(1, args.num_proc),
+        initializer=_init_worker,
+        initargs=(args.tokenizer, eos_id),
+    ) as pool:
+        try:
+            mapped = pool.map(_tokenize_batch, stream.batches(), chunksize=1,
+                              buffersize=max(1, args.num_proc * 2))
+        except TypeError:  # Python < 3.14 lacks buffersize
+            mapped = pool.map(_tokenize_batch, stream.batches(), chunksize=1)
+        for arrays in mapped:
+            if not arrays:
+                continue
+            arr = np.concatenate(arrays)
+            take = min(arr.size, args.train_tokens - written)
+            if take <= 0:
+                break
+            writer.write(arr[:take])
+            written += take
+            if written // 1_000_000_000 != (written - take) // 1_000_000_000:
+                print(f"[prepare] {written/1e9:.2f}B / {args.train_tokens/1e9:.2f}B tokens "
+                      f"({time.time()-t0:.0f}s)", flush=True)
+            if written >= args.train_tokens:
+                break
+
     total = writer.close()
     meta = {
         "train_files": writer.files,
@@ -214,8 +279,20 @@ def main() -> None:
         "mix": {s.name: s.share for s in sources},
         "shard_tokens": args.shard_tokens,
     }
-    with open(os.path.join(args.out_dir, "meta.json"), "w") as f:
+    meta_path = os.path.join(args.out_dir, "meta.json")
+    with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
+    if writer.hf_api is not None:
+        try:
+            writer.hf_api.upload_file(
+                path_or_fileobj=meta_path,
+                path_in_repo="python_mix/meta.json",
+                repo_id=writer.hf_repo_id,
+                repo_type="dataset",
+            )
+            print(f"[prepare] uploaded meta.json -> {writer.hf_repo_id}", flush=True)
+        except Exception as exc:
+            print(f"[prepare] meta upload failed: {exc}", flush=True)
     print(f"[prepare] wrote {len(writer.files)} shards / {total:,} tokens -> {args.out_dir}")
 
 

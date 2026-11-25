@@ -85,7 +85,8 @@ and writes contiguous `uint16` shards — **no padding**.
 
 python scripts/prepare_data.py \
   --out_dir /data/python_mix \
-  --train_tokens 17000000000
+  --train_tokens 17000000000 \
+  --num_proc 8
 ```
 
 The default Python source is `codeparrot/codeparrot-clean` so a fresh machine
@@ -101,12 +102,18 @@ windows.  It never pads; document boundaries are already marked by EOS in the
 shards.  On Modal the shards live on the `passchain-data` volume at
 `/data/python_mix`.
 
-On the first Modal run, `ensure_data()` tries a prebuilt shard snapshot from
-`HF_DATA_REPO_ID` (default `LostStranger67/chain-diffuser`), otherwise it
-streams/tokenizes the mix once.  Either way it `volume.commit()`s the shards;
-later runs see `meta.json` and start **immediately from the cached volume**.
-Override the data repo or token budget with `HF_DATA_REPO_ID` /
-`PASSCHAIN_DATA_TOKENS`.
+Run the CPU-only shard builder once before the B200 job:
+
+```bash
+modal run modal_train.py::prepare_data --train-tokens 17000000000
+```
+
+It tokenizes with `num_proc=8`, publishes every completed shard to the public
+dataset repo `LostStranger67/passchain-python-shards`, and commits the
+`passchain-data` Modal Volume every 1B tokens.  On the B200,
+`ensure_train_data()` starts as soon as two `train_*.bin` shards are cached
+(auto-splitting the last shard into `val.bin` if needed), and only downloads
+from the shard repo when `/data/python_mix` is empty.  The B200 starts on the shards present at launch.  Override the data repo with `HF_DATA_REPO_ID`.
 
 ## Leg 1 — RTX PRO 6000 (0 → 7B tokens)
 
