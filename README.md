@@ -172,8 +172,11 @@ export HF_REPO_ID=LostStranger67/passchain-3b-python
 export HF_TOKEN=...
 ```
 
-Public project/report page:
-`https://huggingface.co/LostStranger67/chain-diffuser`.
+Public shard dataset:
+`https://huggingface.co/datasets/LostStranger67/passchain-python-shards`.
+
+Model checkpoints:
+`https://huggingface.co/LostStranger67/passchain-3b-python`.
 
 ## License
 
