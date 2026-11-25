@@ -6,6 +6,8 @@ import os
 
 import modal
 
+DEFAULT_HF_REPO_ID = "LostStranger67/passchain-3b-python"
+
 app = modal.App("passchain-3b-python")
 
 # Mount this checkout into the image.  When running from CI, replace
@@ -43,6 +45,7 @@ volume = modal.Volume.from_name("passchain-data", create_if_missing=True)
 def train(phase: str = "stable", steps: int = 0):
     import subprocess
 
+    os.environ.setdefault("HF_REPO_ID", DEFAULT_HF_REPO_ID)
     os.chdir("/workspace/passchain")
     cmd = [
         "python",

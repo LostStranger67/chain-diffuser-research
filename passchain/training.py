@@ -242,12 +242,13 @@ def train(args) -> Dict:
 
     out_dir = args.out_dir or train_cfg.get("out_dir", "runs/passchain_3b")
     os.makedirs(out_dir, exist_ok=True)
+    hf_repo_id = args.hf_repo_id or os.environ.get("HF_REPO_ID") or train_cfg.get("hf_repo_id")
     rng = np.random.default_rng(seed + 10_000)
     start_step = 0
     latest_path = os.path.join(out_dir, "ckpt_latest.pt")
     resume_path = args.resume_from
     if args.resume_from_hf:
-        resume_path = download_latest(out_dir, args.hf_repo_id)
+        resume_path = download_latest(out_dir, hf_repo_id)
     if resume_path and os.path.exists(resume_path):
         start_step, _ = load_checkpoint(resume_path, model, opt_muon, opt_adamw, device)
         print(f"[train] resumed {resume_path} at step {start_step}", flush=True)
@@ -321,13 +322,13 @@ def train(args) -> Dict:
                             include_optimizer=True, extra={"losses": losses[-20:]})
             last_save = time.time()
             print(f"[ckpt] saved {latest_path}", flush=True)
-            upload_latest(latest_path, args.hf_repo_id, "ckpt_latest.pt")
+            upload_latest(latest_path, hf_repo_id, "ckpt_latest.pt")
 
     # final weights-only checkpoint + HF push
     final_path = os.path.join(out_dir, "ckpt_final.pt")
     save_checkpoint(final_path, model, opt_muon, opt_adamw, total_steps, cfg, rng,
                     include_optimizer=False, extra={"losses": losses[-20:]})
-    upload_latest(final_path, args.hf_repo_id, "ckpt_final.pt")
+    upload_latest(final_path, hf_repo_id, "ckpt_final.pt")
     print(f"[ckpt] wrote {final_path}", flush=True)
     summary = {
         "config": args.config,

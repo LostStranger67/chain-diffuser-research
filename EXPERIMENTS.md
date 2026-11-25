@@ -10,7 +10,7 @@ Status: `TODO` / `RUNNING` / `DONE`. Update only the row you own.
 | Tokens | 0 → 7B |
 | Config | `configs/passchain_3b_python.yaml` |
 | Schedule | WSD **stable** (2% warmup, constant peak LR) |
-| Checkpointing | `ckpt_latest.pt` every 30 min → private HF repo |
+| Checkpointing | `ckpt_latest.pt` every 30 min → `LostStranger67/passchain-3b-python` |
 | Status | **TODO** |
 | Notes | 3.0B total / ~400M routed-active PassChain-40; Python-heavy mix |
 
@@ -22,8 +22,8 @@ Status: `TODO` / `RUNNING` / `DONE`. Update only the row you own.
 | Tokens | 7B → 17B |
 | Config | `configs/passchain_3b_python.yaml` |
 | Schedule | WSD **stable** then `1 - sqrt(progress)` cooldown over the final 10–15% on clean Python instruction data |
-| Checkpointing | Resume `ckpt_latest.pt` from HF; roll every 30 min; push `ckpt_final.pt` |
-| Launcher | `modal run modal_train.py --phase stable` (then `--phase decay` for the cooldown segment) |
+| Checkpointing | Resume `ckpt_latest.pt` from `LostStranger67/passchain-3b-python`; roll every 30 min; push `ckpt_final.pt` |
+| Launcher | `modal run modal_train.py --phase stable --steps 14779` then `modal run modal_train.py --phase decay --steps 16211` |
 | Status | **TODO** |
 | Notes | 4-hour hard cap (`timeout=14400`) inside Starter credit; rolling checkpoints make timeouts safe |
 
