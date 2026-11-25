@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+"""Thin entry point; CLI flags including --micro-batch live in passchain.training."""
 from __future__ import annotations
 
 import os

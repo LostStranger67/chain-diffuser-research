@@ -166,6 +166,8 @@ def train(args) -> Dict:
     cfg, train_cfg, data_cfg = load_yaml_config(args.config)
     if args.phase:
         train_cfg["phase"] = args.phase
+    if args.micro_batch:
+        train_cfg["micro_batch"] = int(args.micro_batch)
     if args.no_compile:
         train_cfg["compile"] = False
     if args.device:
@@ -361,6 +363,8 @@ def main():
     ap.add_argument("--resume_from", default=None)
     ap.add_argument("--resume_from_hf", action="store_true")
     ap.add_argument("--hf_repo_id", default=None)
+    ap.add_argument("--micro-batch", dest="micro_batch", type=int, default=0,
+                    help="override config micro_batch; grad_accum is recomputed from global_batch")
     ap.add_argument("--log_interval", type=int, default=0)
     ap.add_argument("--no_compile", action="store_true")
     ap.add_argument("--device", default=None)

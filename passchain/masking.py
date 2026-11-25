@@ -138,16 +138,24 @@ def block_diffusion_block_mask(cfg: DiffConfig, device: torch.device):
     the 128-token kernel block granularity (our blocks are 64 tokens), so every
     partial kernel block must evaluate mask_mod elementwise for exactness.
     """
+    import inspect
+
     from torch.nn.attention.flex_attention import create_block_mask
 
     mask_mod = block_diffusion_mask_mod(cfg)
-    return create_block_mask(
-        mask_mod,
+    kwargs = dict(
         B=None,
         H=None,
         Q_LEN=cfg.context_len,
         KV_LEN=cfg.context_len,
         BLOCK_SIZE=128,
         device=device,
-        separate_full_blocks=False,
     )
+    # ``separate_full_blocks`` was added to some torch versions and removed/
+    # renamed in others.  Only pass it when the installed signature accepts it.
+    sig = inspect.signature(create_block_mask)
+    if "separate_full_blocks" in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        kwargs["separate_full_blocks"] = False
+    return create_block_mask(mask_mod, **kwargs)

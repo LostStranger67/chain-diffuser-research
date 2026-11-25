@@ -50,6 +50,10 @@ and [`results/SCALE_1500M_REPORT.md`](results/SCALE_1500M_REPORT.md).
 The ~400M target is the **activated routed-expert** budget; shared experts,
 attention, and embeddings bring the total active count to ~604M.
 
+`--micro-batch` recomputes gradient accumulation automatically while keeping
+the global batch at 512 sequences.  The config defaults to **8** (96 GB cards);
+the B200 launcher defaults to **16**.
+
 ## Quickstart
 
 ```bash
@@ -97,6 +101,13 @@ windows.  It never pads; document boundaries are already marked by EOS in the
 shards.  On Modal the shards live on the `passchain-data` volume at
 `/data/python_mix`.
 
+On the first Modal run, `ensure_data()` tries a prebuilt shard snapshot from
+`HF_DATA_REPO_ID` (default `LostStranger67/chain-diffuser`), otherwise it
+streams/tokenizes the mix once.  Either way it `volume.commit()`s the shards;
+later runs see `meta.json` and start **immediately from the cached volume**.
+Override the data repo or token budget with `HF_DATA_REPO_ID` /
+`PASSCHAIN_DATA_TOKENS`.
+
 ## Leg 1 — RTX PRO 6000 (0 → 7B tokens)
 
 ```bash
@@ -104,6 +115,7 @@ python scripts/train.py \
   --config configs/passchain_3b_python.yaml \
   --phase stable \
   --steps 6676 \
+  --micro-batch 8 \
   --data_dir /data/python_mix \
   --out_dir runs/leg1
 ```
@@ -121,10 +133,10 @@ modal secret create huggingface-secret \
   HF_REPO_ID=LostStranger67/passchain-3b-python
 
 # Stable segment, resuming ckpt_latest.pt from HF:
-modal run modal_train.py --phase stable --steps 14779
+modal run modal_train.py --phase stable --steps 14779 --micro-batch 16
 
 # Final 1 - sqrt(progress) cooldown on clean Python instruction data:
-modal run modal_train.py --phase decay --steps 16211
+modal run modal_train.py --phase decay --steps 16211 --micro-batch 16
 ```
 
 The launcher has a **4-hour hard cap** (`timeout=14400`), runs on a B200,
