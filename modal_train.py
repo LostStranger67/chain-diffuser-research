@@ -167,6 +167,7 @@ def ensure_train_data() -> None:
 
 
 @app.function(
+    image=image,
     cpu=8,
     memory=16384,
     timeout=14400,
