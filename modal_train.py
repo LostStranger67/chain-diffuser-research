@@ -19,14 +19,21 @@ image = (
     modal.Image.from_registry(
         "pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime",
     )
+    # Ubuntu 24.04 images mark the system Python as externally managed (PEP 668).
+    # This env var applies to Modal's build-time pip invocations.
+    .env({
+        "PIP_BREAK_SYSTEM_PACKAGES": "1",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    })
     .apt_install("git")
     .pip_install(
+        "torch==2.11.0",
         "torchao==0.18.0",
-        "huggingface_hub",
         "datasets",
-        "transformers",
-        "pyyaml",
+        "huggingface_hub",
         "numpy",
+        "pyyaml",
+        "transformers",
     )
     .add_local_dir(
         ".",
