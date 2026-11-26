@@ -98,3 +98,32 @@ sequence tokens (`lm_chunk_tokens`) and `--no-fp8` is available for an A/B test.
 - Added `--no-upload` to skip 23.7 GB + 11.7 GB uploads on profiling runs.
 - `ckpt_final.pt` is now BF16 (~5.85 GB at 3B); `ckpt_latest.pt` remains
   full-precision with optimizer states for lossless resume.
+
+## Second B200 trace (after forward unpermute fix)
+
+- **19.76 s/step, 53.1k tok/s**
+- Forward: 550 ms → 359 ms
+- Backward: 779 ms → 782 ms (flat)
+- Remaining `aten::index_add`: 30 calls / 155.4 ms (13.3%) from the
+  backward of the sorted token gather
+
+### Second fix
+
+Added `_GatherSorted`, a symmetric bijective autograd function:
+
+- Forward: `x[index_sorted]`
+- Backward: `grad_sorted[index_inverse].view(N,k,D).sum(1)`
+
+Both custom MoE permutations are registered with
+`torch._dynamo.allow_in_graph`.  Local profiler output now contains **zero**
+`index_add`/`indexFunc` entries, and `torch._dynamo.explain` reports
+**0 graph breaks / 1 graph**.
+
+FlexAttention audit: `BLOCK_SIZE=64` is invalid on this PyTorch stack
+(`Q and KV block size must be divisible by BLOCK_M/BLOCK_N`), so the kernel
+keeps `BLOCK_SIZE=128`.  `separate_full_blocks=True` was verified numerically
+identical to `False` for the 64-token block mask and is now kept.  Q/K/V are
+contiguous.  No unverified `kernel_options` override is enabled.
+
+Checkpoint hygiene: `--no-upload` skips both HF transfers; `ckpt_final.pt` is
+BF16 and `ckpt_latest.pt` remains full precision with optimizer state.

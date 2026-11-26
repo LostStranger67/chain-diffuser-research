@@ -143,6 +143,35 @@ def _dispatch_padded(xf, top_idx, top_w, wg, wd, cap_factor=1.25):
     return routed, counts, drop_frac
 
 
+class _GatherSorted(torch.autograd.Function):
+    """Bijective gather of tokens into expert-sorted order without index_add.
+
+    Forward: ``x[index_sorted]`` (tokens may be duplicated k times).
+    Backward: gather the expanded token-grad stream back with the inverse
+    permutation and sum the k copies.  No atomic scatter-add is used.
+    """
+
+    @staticmethod
+    def forward(ctx, x, index_sorted, inv_index):
+        ctx.save_for_backward(index_sorted, inv_index)
+        ctx.n = x.shape[0]
+        ctx.k = index_sorted.numel() // ctx.n
+        return x.index_select(0, index_sorted)
+
+    @staticmethod
+    def backward(ctx, grad_sorted):
+        _index_sorted, inv_index = ctx.saved_tensors
+        return grad_sorted.index_select(0, inv_index).view(
+            ctx.n, ctx.k, grad_sorted.shape[-1]
+        ).sum(dim=1), None, None
+
+
+try:  # Let Dynamo place the custom op without a graph break.
+    torch._dynamo.allow_in_graph(_GatherSorted.apply)
+except Exception:  # pragma: no cover - older torch
+    pass
+
+
 class _UnpermuteSum(torch.autograd.Function):
     """Bijective sorted->original unpermute + k-sum without index_add.
 
@@ -187,7 +216,8 @@ def _dispatch_grouped(xf, top_idx, top_w, wg, wd):
     counts = _histogram(flat, wg.shape[0])
     offs = counts.cumsum(0).to(torch.int32)
     tok = (order // k).to(torch.long)
-    xe = xf.index_select(0, tok)
+    inv_tok = torch.argsort(tok, stable=True)
+    xe = _GatherSorted.apply(xf, tok, inv_tok)
     gu = torch._grouped_mm(xe, wg, offs=offs)
     g, u = gu.chunk(2, dim=-1)
     oe = torch._grouped_mm(F.silu(g) * u, wd, offs=offs)

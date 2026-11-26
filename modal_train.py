@@ -281,7 +281,10 @@ def train(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICR
         cmd += ["--no-upload"]
     print("[modal] running:", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
-    print("[modal] finished; ckpt_final.pt was pushed to Hugging Face", flush=True)
+    if no_upload:
+        print("[modal] finished (--no-upload; skipped Hugging Face push)", flush=True)
+    else:
+        print("[modal] finished; ckpt_latest.pt + ckpt_final.pt were pushed to Hugging Face", flush=True)
 
 
 @app.local_entrypoint()

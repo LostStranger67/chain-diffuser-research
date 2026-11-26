@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from passchain.config import DiffConfig, LAYOUTS
 from passchain.masking import batch_to_torch, block_diffusion_block_mask, build_sequence_batch
-from passchain.model import DiffusionTransformer, MoEFFN, _dispatch_grouped
+from passchain.model import DiffusionTransformer, MoEFFN, _GatherSorted, _dispatch_grouped
 from passchain.optim import Muon, assert_optimizer_coverage, build_param_groups, wsd_lr, zeropower_via_newtonschulz5
 from passchain.precision import _fp8_module_filter, enable_fp8, fp8_available
 from passchain.training import load_yaml_config, masked_ce, train_step
@@ -175,6 +175,22 @@ def _old_grouped_index_add(xf, top_idx, top_w, wg, wd):
     return routed
 
 
+def test_bijective_gather_matches_index_select():
+    """The sorted token gather must match naive gather forward and dX."""
+    torch.manual_seed(13)
+    N, k, D = 8, 2, 8
+    token_idx = torch.tensor([3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 0, 0, 1, 1, 2, 2], device="cuda")
+    inv = torch.argsort(token_idx, stable=True)
+    x = torch.randn(N, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x2 = x.detach().clone().requires_grad_(True)
+    new = _GatherSorted.apply(x, token_idx, inv)
+    old = x2.index_select(0, token_idx)
+    g_new, = torch.autograd.grad(new.float().pow(2).mean(), x)
+    g_old, = torch.autograd.grad(old.float().pow(2).mean(), x2)
+    assert torch.allclose(new.float(), old.float(), rtol=2e-2, atol=2e-2)
+    assert torch.allclose(g_new.float(), g_old.float(), rtol=3e-2, atol=3e-2)
+
+
 def test_bijective_unpermute_matches_index_add():
     """Forward and dX/dWeights must match the old atomic index_add path."""
     import torch.nn.functional as F
@@ -249,6 +265,22 @@ def test_chunked_ce_matches_full():
     ):
         assert torch.allclose(got.float(), ref.float(), rtol=2e-2, atol=2e-2), (name, got, ref)
     assert torch.allclose(full[0].float(), small[0].float(), rtol=2e-2, atol=2e-2)
+
+
+def test_separate_full_blocks_true_matches_false():
+    import inspect
+    from torch.nn.attention.flex_attention import create_block_mask
+    from passchain.masking import block_diffusion_mask_mod
+
+    if "separate_full_blocks" not in inspect.signature(create_block_mask).parameters:
+        pytest.skip("separate_full_blocks unsupported by this torch")
+    cfg = tiny_cfg(block_size=64, n_blocks=8)
+    mm = block_diffusion_mask_mod(cfg)
+    kwargs = dict(B=None, H=None, Q_LEN=cfg.context_len, KV_LEN=cfg.context_len,
+                  BLOCK_SIZE=128, device=DEV)
+    b0 = create_block_mask(mm, separate_full_blocks=False, **kwargs)
+    b1 = create_block_mask(mm, separate_full_blocks=True, **kwargs)
+    assert torch.equal(b0.to_dense(), b1.to_dense())
 
 
 def test_wsd_schedule_math():
