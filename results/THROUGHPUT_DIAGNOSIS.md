@@ -54,7 +54,7 @@ The B200 split should be measured with:
 
 ```bash
 modal run modal_train.py --phase stable --steps 5 --micro-batch 16 \
-  --no-resume
+  --no-resume --log-every 1
 ```
 
 and the per-step `fwd_bwd_s` / `opt_s` counters.  No B200 post-fix numbers are
