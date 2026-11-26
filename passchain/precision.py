@@ -14,15 +14,26 @@ def fp8_available(device: torch.device | str | None = None) -> bool:
     return cap[0] >= 9
 
 
-def enable_fp8(model: torch.nn.Module, enabled: bool = True) -> bool:
-    """Apply torchao dynamic FP8 to all nn.Linear projections.
+def _fp8_module_filter(module: torch.nn.Module, fqn: str) -> bool:
+    """Only safe, tensor-core-aligned linear projections are swapped.
 
-    On SM >= 9.0 with torchao installed this switches attention, dense, and
-    shared-expert Linear layers to float8_dynamic_activation_float8_weight.
-    On SM 8.6 (RTX 3090) or when torchao is unavailable it leaves the model in
-    BF16 and returns False.  The grouped routed-expert pool GEMMs remain BF16;
-    they are streamed as raw contiguous expert rows, so torchao's module-level
-    replacement does not apply to them.
+    Keep the tied LM head and routers in high precision, and skip any linear
+    whose input/output dimensions violate the FP8 GEMM multiple-of-16 rule.
+    """
+    if not isinstance(module, torch.nn.Linear):
+        return False
+    low = fqn.lower()
+    if "lm_head" in low or "router" in low:
+        return False
+    return (module.in_features % 16 == 0) and (module.out_features % 16 == 0)
+
+
+def enable_fp8(model: torch.nn.Module, enabled: bool = True) -> bool:
+    """Swap safe ``nn.Linear`` layers with torchao Float8Linear for training.
+
+    Runs before optimizer construction so the Muon/AdamW splitter sees the
+    swapped modules (and their weight parameters).  On SM 8.6 or when torchao
+    is unavailable, the model stays in BF16 and this returns False.
     """
     if not enabled:
         return False
@@ -30,23 +41,22 @@ def enable_fp8(model: torch.nn.Module, enabled: bool = True) -> bool:
         print("[precision] FP8 requested but GPU is SM < 9.0; using BF16 fallback", flush=True)
         return False
     try:
-        from torchao.quantization import (
-            Float8DynamicActivationFloat8WeightConfig,
-            quantize_,
-        )
+        from torchao.float8 import Float8LinearConfig, convert_to_float8_training
     except Exception as exc:  # pragma: no cover - depends on B200 image
         print(f"[precision] torchao unavailable ({exc}); using BF16 fallback", flush=True)
         return False
     try:
-        quantize_(
+        converted = convert_to_float8_training(
             model,
-            Float8DynamicActivationFloat8WeightConfig(),
-            filter_fn=lambda m, n: isinstance(m, torch.nn.Linear),
+            module_filter_fn=_fp8_module_filter,
+            config=Float8LinearConfig(),
         )
+        if converted is not model:  # root-level Linear is not our case
+            raise RuntimeError("unexpected root-level model swap")
     except Exception as exc:  # pragma: no cover - Blackwell-specific
         print(f"[precision] torchao FP8 setup failed ({exc}); using BF16 fallback", flush=True)
         return False
-    print("[precision] torchao dynamic FP8 enabled for nn.Linear layers", flush=True)
+    print("[precision] torchao convert_to_float8_training enabled (safe nn.Linear layers)", flush=True)
     return True
 
 

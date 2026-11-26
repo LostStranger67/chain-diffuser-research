@@ -115,6 +115,31 @@ def build_param_groups(model: torch.nn.Module, lr_muon: float, lr_adamw: float,
     ]
 
 
+def optimizer_parameter_ids(optimizers) -> set[int]:
+    ids = set()
+    for opt in optimizers:
+        for group in opt.param_groups:
+            for p in group["params"]:
+                ids.add(id(p))
+    return ids
+
+
+def assert_optimizer_coverage(model: torch.nn.Module, optimizers, label: str = "optimizer") -> dict:
+    """Hard gate: every trainable parameter must belong to exactly one optimizer."""
+    trainable = {id(p): p for p in model.parameters() if p.requires_grad}
+    assigned = optimizer_parameter_ids(optimizers)
+    missing = set(trainable) - assigned
+    extra = assigned - set(trainable)
+    if missing or extra:
+        missing_names = [n for n, p in model.named_parameters() if id(p) in missing]
+        raise AssertionError(
+            f"{label} coverage failed: missing={len(missing)} ({missing_names[:8]}), "
+            f"extra={len(extra)}, trainable={len(trainable)}, assigned={len(assigned)}"
+        )
+    total = sum(p.numel() for p in trainable.values())
+    return {"trainable_params": len(trainable), "total_numel": total, "assigned": len(assigned)}
+
+
 def wsd_lr(step: int, total_steps: int, peak_lr: float,
            warmup_frac: float = 0.02, decay_frac: float = 0.15,
            phase: str = "stable") -> float:
@@ -140,4 +165,4 @@ def wsd_lr(step: int, total_steps: int, peak_lr: float,
     return float(peak_lr * (1.0 - math.sqrt(progress)))
 
 
-__all__ = ["Muon", "build_param_groups", "wsd_lr", "zeropower_via_newtonschulz5"]
+__all__ = ["Muon", "build_param_groups", "optimizer_parameter_ids", "assert_optimizer_coverage", "wsd_lr", "zeropower_via_newtonschulz5"]

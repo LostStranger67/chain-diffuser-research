@@ -129,7 +129,7 @@ python scripts/train.py \
 
 `6676 × 512 × 2048 ≈ 7B` noisy tokens.  WSD uses a 2% linear warmup and then
 constant peak LR.  Rolling `ckpt_latest.pt` is uploaded every 30 minutes to
-`LostStranger67/passchain-3b-python` by default.
+`LostStranger67/chain-diffuser` by default.
 
 ## Leg 2 — Modal B200 (7B → 17B tokens)
 
@@ -137,7 +137,7 @@ constant peak LR.  Rolling `ckpt_latest.pt` is uploaded every 30 minutes to
 # One-time secret (HF token with write access to the model repo):
 modal secret create huggingface-secret \
   HF_TOKEN=... \
-  HF_REPO_ID=LostStranger67/passchain-3b-python
+  HF_REPO_ID=LostStranger67/chain-diffuser
 
 # Stable segment, resuming ckpt_latest.pt from HF:
 modal run modal_train.py --phase stable --steps 14779 --micro-batch 16
@@ -165,10 +165,10 @@ EXPERIMENTS.md shared job board
 
 ## Hugging Face
 
-Default checkpoint repo: **`LostStranger67/passchain-3b-python`**
+Default checkpoint repo: **`LostStranger67/chain-diffuser`**
 
 ```bash
-export HF_REPO_ID=LostStranger67/passchain-3b-python
+export HF_REPO_ID=LostStranger67/chain-diffuser
 export HF_TOKEN=...
 ```
 
@@ -176,7 +176,7 @@ Public shard dataset:
 `https://huggingface.co/datasets/LostStranger67/passchain-python-shards`.
 
 Model checkpoints:
-`https://huggingface.co/LostStranger67/passchain-3b-python`.
+`https://huggingface.co/LostStranger67/chain-diffuser`.
 
 ## License
 

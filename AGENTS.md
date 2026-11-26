@@ -12,7 +12,7 @@ These rules apply to every AI agent working in this repository.
    `data/`, `.env`, and logs are ignored and must stay out of Git.
 4. **Use rolling HF checkpoint sync.** Every training job must save
    `ckpt_latest.pt` atomically and upload it to the private HF repo
-   (`LostStranger67/passchain-3b-python`, env `HF_REPO_ID`) on the configured interval. Resume with
+   (`LostStranger67/chain-diffuser`, env `HF_REPO_ID`) on the configured interval. Resume with
    `--resume_from_hf`.
 5. **Report reproducible numbers.** Record the config hash, commit SHA, token
    count, hardware, and wall time in `EXPERIMENTS.md`; do not fabricate runs.

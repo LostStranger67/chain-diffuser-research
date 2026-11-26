@@ -130,7 +130,6 @@ class BatchDocStream:
 
 class ShardWriter:
     def __init__(self, out_dir: str, prefix: str, shard_tokens: int,
-                 hf_repo_id: str | None = None, upload: bool = True,
                  start_idx: int = 0, existing_files: Sequence[str] = (),
                  existing_tokens: int = 0):
         self.out_dir, self.prefix, self.shard_tokens = out_dir, prefix, shard_tokens
@@ -139,20 +138,6 @@ class ShardWriter:
         self.idx = start_idx
         self.files: List[str] = list(existing_files)
         self.total_tokens = int(existing_tokens)
-        self.hf_repo_id = hf_repo_id
-        self.hf_api = None
-        self.upload = upload
-        if upload and hf_repo_id:
-            try:
-                from huggingface_hub import HfApi
-
-                self.hf_api = HfApi()
-                self.hf_api.create_repo(repo_id=hf_repo_id, repo_type="dataset",
-                                        private=False, exist_ok=True)
-                print(f"[prepare] HF shard upload -> {hf_repo_id}", flush=True)
-            except Exception as exc:
-                print(f"[prepare] HF upload disabled ({exc})", flush=True)
-                self.hf_api = None
 
     def write(self, arr: np.ndarray) -> None:
         self.parts.append(arr)
@@ -171,17 +156,6 @@ class ShardWriter:
         self.files.append(name)
         self.total_tokens += int(arr.size)
         print(f"  wrote {name} ({arr.size:,} tokens)", flush=True)
-        if self.hf_api is not None:
-            try:
-                self.hf_api.upload_file(
-                    path_or_fileobj=path,
-                    path_in_repo=f"python_mix/{name}",
-                    repo_id=self.hf_repo_id,
-                    repo_type="dataset",
-                )
-                print(f"  uploaded {name} -> {self.hf_repo_id}", flush=True)
-            except Exception as exc:
-                print(f"  upload failed for {name}: {exc}", flush=True)
         self.idx += 1
 
     def close(self) -> int:
@@ -225,7 +199,6 @@ def main() -> None:
     start_idx = len(existing)
     writer = ShardWriter(
         args.out_dir, "train", args.shard_tokens,
-        hf_repo_id=args.hf_repo_id, upload=not args.no_upload,
         start_idx=start_idx, existing_files=[os.path.basename(p) for p in existing],
         existing_tokens=existing_tokens,
     )
@@ -282,17 +255,21 @@ def main() -> None:
     meta_path = os.path.join(args.out_dir, "meta.json")
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
-    if writer.hf_api is not None:
+    if not args.no_upload and args.hf_repo_id:
         try:
-            writer.hf_api.upload_file(
-                path_or_fileobj=meta_path,
-                path_in_repo="python_mix/meta.json",
-                repo_id=writer.hf_repo_id,
+            from huggingface_hub import HfApi
+
+            api = HfApi()
+            api.create_repo(repo_id=args.hf_repo_id, repo_type="dataset",
+                            private=False, exist_ok=True)
+            print(f"[prepare] upload_large_folder -> {args.hf_repo_id}", flush=True)
+            api.upload_large_folder(
+                folder_path=args.out_dir,
+                repo_id=args.hf_repo_id,
                 repo_type="dataset",
             )
-            print(f"[prepare] uploaded meta.json -> {writer.hf_repo_id}", flush=True)
         except Exception as exc:
-            print(f"[prepare] meta upload failed: {exc}", flush=True)
+            print(f"[prepare] large-folder upload failed: {exc}", flush=True)
     print(f"[prepare] wrote {len(writer.files)} shards / {total:,} tokens -> {args.out_dir}")
 
 

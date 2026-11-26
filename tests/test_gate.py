@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from passchain.config import DiffConfig, LAYOUTS
 from passchain.masking import batch_to_torch, block_diffusion_block_mask, build_sequence_batch
 from passchain.model import DiffusionTransformer, MoEFFN
-from passchain.optim import Muon, build_param_groups, wsd_lr, zeropower_via_newtonschulz5
-from passchain.precision import enable_fp8, fp8_available
+from passchain.optim import Muon, assert_optimizer_coverage, build_param_groups, wsd_lr, zeropower_via_newtonschulz5
+from passchain.precision import _fp8_module_filter, enable_fp8, fp8_available
 from passchain.training import load_yaml_config, train_step
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -107,6 +107,51 @@ def test_muon_adamw_split():
     after = m.layers[1].ffn.shared.gate_up.weight.detach()
     assert torch.isfinite(after).all()
     assert not torch.equal(before, after)
+
+
+def test_swapped_linear_coverage():
+    """A swapped/subclassed Float8Linear weight must never be dropped."""
+    import torch.nn as nn
+
+    class SwappedLinear(nn.Linear):
+        pass
+
+    class Float8Like(nn.Module):
+        def __init__(self, weight):
+            super().__init__()
+            self.weight = nn.Parameter(weight.detach().clone())
+
+    cfg = tiny_cfg()
+    m = DiffusionTransformer(cfg)
+    old = m.layers[0].ffn.body.gate_up
+    m.layers[0].ffn.body.gate_up = SwappedLinear(
+        old.in_features, old.out_features, bias=False
+    )
+    m.layers[0].ffn.body.gate_up.weight = old.weight
+    old_down = m.layers[1].ffn.shared.down
+    m.layers[1].ffn.shared.down = Float8Like(old_down.weight)
+
+    groups = build_param_groups(m, lr_muon=0.02, lr_adamw=3e-4)
+    muon, adamw = groups[0]["params"], groups[1]["params"]
+    all_trainable = {id(p) for p in m.parameters() if p.requires_grad}
+    assert {id(p) for p in muon}.isdisjoint({id(p) for p in adamw})
+    assert {id(p) for p in muon} | {id(p) for p in adamw} == all_trainable
+
+    opt_muon = Muon(muon, lr=0.01)
+    opt_adamw = torch.optim.AdamW(adamw, lr=3e-4)
+    stats = assert_optimizer_coverage(m, [opt_muon, opt_adamw], "swapped")
+    total = sum(p.numel() for p in m.parameters() if p.requires_grad)
+    assert stats["total_numel"] == total
+    assert sum(p.numel() for p in muon) + sum(p.numel() for p in adamw) == total
+
+
+def test_fp8_module_filter():
+    import torch.nn as nn
+
+    assert _fp8_module_filter(nn.Linear(16, 32), "layer.q_proj") is True
+    assert _fp8_module_filter(nn.Linear(15, 32), "layer.q_proj") is False
+    assert _fp8_module_filter(nn.Linear(16, 32), "lm_head") is False
+    assert _fp8_module_filter(nn.Linear(16, 32), "layers.1.ffn.router_w") is False
 
 
 def test_wsd_schedule_math():

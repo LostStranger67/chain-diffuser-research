@@ -23,6 +23,14 @@ from .model import DiffusionTransformer
 from .optim import Muon, build_param_groups, wsd_lr
 from .precision import enable_fp8
 
+_POST_OPTIMIZER_HOOK = None
+
+
+def set_post_optimizer_hook(fn):
+    """Used by scripts/train.py to assert optimizer coverage immediately after creation."""
+    global _POST_OPTIMIZER_HOOK
+    _POST_OPTIMIZER_HOOK = fn
+
 
 def load_yaml_config(path: str) -> Tuple[DiffConfig, Dict, Dict]:
     with open(path) as f:
@@ -227,6 +235,8 @@ def train(args) -> Dict:
     )
     print(f"[train] Muon params={sum(p.numel() for p in groups[0]['params'])/1e6:.2f}M "
           f"AdamW params={sum(p.numel() for p in groups[1]['params'])/1e6:.2f}M", flush=True)
+    if _POST_OPTIMIZER_HOOK is not None:
+        _POST_OPTIMIZER_HOOK(model, opt_muon, opt_adamw)
 
     if train_cfg.get("compile", True):
         print("[train] torch.compile(model) ...", flush=True)

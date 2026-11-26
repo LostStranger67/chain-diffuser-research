@@ -8,7 +8,7 @@ import time
 
 import modal
 
-DEFAULT_HF_REPO_ID = "LostStranger67/passchain-3b-python"
+DEFAULT_HF_REPO_ID = "LostStranger67/chain-diffuser"
 DEFAULT_DATA_REPO = "LostStranger67/passchain-python-shards"
 DATA_DIR = "/data/python_mix"
 DEFAULT_MICRO_BATCH = 16
@@ -26,6 +26,7 @@ image = (
     .env({
         "PIP_BREAK_SYSTEM_PACKAGES": "1",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PYTHONUNBUFFERED": "1",
     })
     .apt_install("git")
     .pip_install(
@@ -166,6 +167,20 @@ def ensure_train_data() -> None:
     print(f"[modal] fast-starting B200 with {len(_train_shards())} train shards", flush=True)
 
 
+def _upload_large_folder() -> None:
+    """Batch the shard upload with upload_large_folder (few HF commits)."""
+    try:
+        from huggingface_hub import HfApi
+
+        repo = os.environ.get("HF_DATA_REPO_ID", DEFAULT_DATA_REPO)
+        api = HfApi()
+        api.create_repo(repo_id=repo, repo_type="dataset", private=False, exist_ok=True)
+        print(f"[prep] upload_large_folder -> {repo}", flush=True)
+        api.upload_large_folder(folder_path=DATA_DIR, repo_id=repo, repo_type="dataset")
+    except Exception as exc:
+        print(f"[prep] large-folder upload failed: {exc}", flush=True)
+
+
 @app.function(
     image=image,
     cpu=8,
@@ -192,6 +207,7 @@ def prepare_data(train_tokens: int = 17_000_000_000, num_proc: int = 8, force: b
     os.chdir("/workspace/passchain")
     cmd = [
         "python",
+        "-u",
         "scripts/prepare_data.py",
         "--out_dir",
         DATA_DIR,
@@ -201,6 +217,7 @@ def prepare_data(train_tokens: int = 17_000_000_000, num_proc: int = 8, force: b
         str(num_proc),
         "--hf_repo_id",
         repo,
+        "--no_upload",
     ]
     print("[prep] running:", " ".join(cmd), flush=True)
     proc = subprocess.Popen(cmd)
@@ -211,10 +228,12 @@ def prepare_data(train_tokens: int = 17_000_000_000, num_proc: int = 8, force: b
             volume.commit()
             committed = total
             print(f"[prep] volume.commit at {total/1e9:.2f}B tokens", flush=True)
+            _upload_large_folder()
         time.sleep(30)
     if proc.wait() != 0:
         raise RuntimeError("CPU data preparation failed")
     volume.commit()
+    _upload_large_folder()
     print("[prep] data prep complete; volume committed", flush=True)
 
 
@@ -233,6 +252,7 @@ def train(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICR
     ensure_train_data()
     cmd = [
         "python",
+        "-u",
         "scripts/train.py",
         "--config",
         "configs/passchain_3b_python.yaml",

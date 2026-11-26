@@ -10,7 +10,7 @@ Status: `TODO` / `RUNNING` / `DONE`. Update only the row you own.
 | Tokens | 0 → 7B |
 | Config | `configs/passchain_3b_python.yaml` |
 | Schedule | WSD **stable** (2% warmup, constant peak LR) |
-| Checkpointing | `ckpt_latest.pt` every 30 min → `LostStranger67/passchain-3b-python` |
+| Checkpointing | `ckpt_latest.pt` every 30 min → `LostStranger67/chain-diffuser` |
 | Data | CPU prep once: `modal run modal_train.py::prepare_data --train-tokens 17000000000` → `LostStranger67/passchain-python-shards` and Modal Volume |
 | Status | **TODO** |
 | Notes | 3.0B total / ~400M routed-active PassChain-40; Python-heavy mix; `--micro-batch 8` on 96 GB |
@@ -23,7 +23,7 @@ Status: `TODO` / `RUNNING` / `DONE`. Update only the row you own.
 | Tokens | 7B → 17B |
 | Config | `configs/passchain_3b_python.yaml` |
 | Schedule | WSD **stable** then `1 - sqrt(progress)` cooldown over the final 10–15% on clean Python instruction data |
-| Checkpointing | Resume `ckpt_latest.pt` from `LostStranger67/passchain-3b-python`; roll every 30 min; push `ckpt_final.pt` |
+| Checkpointing | Resume `ckpt_latest.pt` from `LostStranger67/chain-diffuser`; roll every 30 min; push `ckpt_final.pt` |
 | Launcher | `modal run modal_train.py --phase stable --steps 14779 --micro-batch 16` then `modal run modal_train.py --phase decay --steps 16211 --micro-batch 16` |
 | Status | **TODO** |
 | Notes | 4-hour hard cap (`timeout=14400`); `--micro-batch 16` on B200; `ensure_train_data()` fast-starts from the first 2 cached shards; `prepare_data()` CPU prep caches `/data/python_mix` on the Modal Volume |
