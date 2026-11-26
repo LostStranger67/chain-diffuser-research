@@ -72,3 +72,29 @@ After the combined dispatch + graph-break fix, a 5-step B200 run reported:
 This still leaves substantial headroom. Use `--profile-step` on the next B200
 run to identify the top CUDA kernels; the training loss is now chunked over
 sequence tokens (`lm_chunk_tokens`) and `--no-fp8` is available for an A/B test.
+
+## B200 `--profile-step` trace (post-fix, pre-optimization)
+
+- `aten::index_add` / `indexFuncLargeIndex<BFloat16, ReduceAdd>`:
+  **316.0 ms (23.2%, 60 calls @ 5.25 ms)**
+- `flex_attention` backward: **174.0 ms (12.8%)** vs 38.9 ms forward
+- Chunked CE with `lm_chunk_tokens=512`: 64 chunks/micro, 252 ms CPU,
+  ~156 ms GPU, 7,115 kernel launches and Command Buffer Full (128.7 ms)
+- `aten::_grouped_mm` 247 ms and `aten::_scaled_mm` 58 ms were already fast
+
+### Fixes applied
+
+- Replaced the MoE `index_add_` unpermute with a custom bijective
+  `_UnpermuteSum` autograd function: forward uses `index_select(inv_order) +
+  view(N,k,D).sum(1)`; backward uses `index_select(order)` on the expanded
+  token gradient. A pytest compares forward, dX, and dWeights against the old
+  `index_add_` implementation.
+- Raised 3B `lm_chunk_tokens` **512 → 4096** (8 chunks per 16-micro-batch
+  instead of 64) and reused one FP32 logits copy for both CE and Z-loss.
+- FlexAttention audit: the installed kernel requires **BLOCK_SIZE=128**; a
+  64-token kernel block raised `Q and KV block size must be divisible by
+  BLOCK_M/BLOCK_N`.  We keep 128 and pass contiguous Q/K/V.  Custom
+  `kernel_options` were not enabled without a B200 correctness/timing sweep.
+- Added `--no-upload` to skip 23.7 GB + 11.7 GB uploads on profiling runs.
+- `ckpt_final.pt` is now BF16 (~5.85 GB at 3B); `ckpt_latest.pt` remains
+  full-precision with optimizer states for lossless resume.

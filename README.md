@@ -55,7 +55,7 @@ the global batch at 512 sequences.  The config defaults to **8** (96 GB cards);
 the B200 launcher defaults to **16**.
 
 For throughput benchmarks use `--log-every 1 --no-resume`; each line reports
-`step_s`, `fwd_bwd_s`, `opt_s`, and `tok/s`.  Use `--profile-step` on a 2+ step
+`step_s`, `fwd_bwd_s`, `opt_s`, and `tok/s`.  Use `--no-upload` on short profiling runs.  Use `--profile-step` on a 2+ step
 run to print the top-20 CUDA kernels for the first two micro-batches, and
 `--no-fp8` to A/B test pure BF16 against torchao FP8.  The lm_head loss is
 chunked over sequence tokens (`lm_chunk_tokens`) and never materializes the

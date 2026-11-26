@@ -39,7 +39,7 @@ training:
   total_tokens: 17000000000
   global_batch_seqs: 512
   micro_batch: 8
-  lm_chunk_tokens: 512
+  lm_chunk_tokens: 4096
   lr_muon: 0.02
   lr_adamw: 0.0003
   weight_decay: 0.1

@@ -143,6 +143,36 @@ def _dispatch_padded(xf, top_idx, top_w, wg, wd, cap_factor=1.25):
     return routed, counts, drop_frac
 
 
+class _UnpermuteSum(torch.autograd.Function):
+    """Bijective sorted->original unpermute + k-sum without index_add.
+
+    Forward: ``sorted_out[inv_order].view(N, k, D).sum(1)``.
+    Backward: expand the token gradient to k copies and gather through
+    ``order`` (the inverse permutation) so there are no atomic scatter-adds.
+    """
+
+    @staticmethod
+    def forward(ctx, sorted_out, inv_order, order, n, k):
+        ctx.save_for_backward(inv_order, order)
+        ctx.n = int(n)
+        ctx.k = int(k)
+        return sorted_out.index_select(0, inv_order).view(ctx.n, ctx.k, -1).sum(dim=1)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        inv_order, order = ctx.saved_tensors
+        grad_flat = grad_out.unsqueeze(1).expand(-1, ctx.k, -1).reshape(-1, grad_out.shape[-1])
+        # Sorted position j maps to original position order[j].
+        grad_sorted = grad_flat.index_select(0, order)
+        return grad_sorted, None, None, None, None
+
+
+try:  # Let Dynamo place the custom op without a graph break.
+    torch._dynamo.allow_in_graph(_UnpermuteSum.apply)
+except Exception:  # pragma: no cover - older torch
+    pass
+
+
 def _dispatch_grouped(xf, top_idx, top_w, wg, wd):
     """Dropless sorted dispatch via torch._grouped_mm (16 experts per phase).
 
@@ -162,9 +192,8 @@ def _dispatch_grouped(xf, top_idx, top_w, wg, wd):
     g, u = gu.chunk(2, dim=-1)
     oe = torch._grouped_mm(F.silu(g) * u, wd, offs=offs)
     w_sorted = top_w.reshape(-1).index_select(0, order).to(oe.dtype).unsqueeze(-1)
-    routed = torch.zeros(n, xf.shape[1], device=xf.device, dtype=oe.dtype).index_add(
-        0, tok, oe * w_sorted
-    )
+    inv_order = torch.argsort(order)
+    routed = _UnpermuteSum.apply(oe * w_sorted, inv_order, order, n, k)
     return routed, counts, xf.new_zeros(())
 
 

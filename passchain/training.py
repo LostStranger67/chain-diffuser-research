@@ -65,7 +65,9 @@ def masked_ce(hidden_noisy, weight, targets, mask, t_tok, phase_noisy, chunk=204
     for s in range(0, n, chunk):
         e = min(s + chunk, n)
         logits = F.linear(h[s:e], weight)
-        ce = F.cross_entropy(logits.float(), tgt[s:e], reduction="none")
+        # One BF16->FP32 copy per chunk, shared by CE and the Z-loss statistic.
+        logits_f = logits.float()
+        ce = F.cross_entropy(logits_f, tgt[s:e], reduction="none")
         m_c = m[s:e]
         ce_m = ce * m_c
         wce_m = ce_m / t[s:e]
@@ -74,7 +76,7 @@ def masked_ce(hidden_noisy, weight, targets, mask, t_tok, phase_noisy, chunk=204
         per_phase_ce = per_phase_ce.index_add(0, ph[s:e], ce_m)
         per_phase_elbo = per_phase_elbo.index_add(0, ph[s:e], wce_m)
         per_phase_count = per_phase_count.index_add(0, ph[s:e], m_c)
-        z = torch.logsumexp(logits.float(), dim=-1)
+        z = torch.logsumexp(logits_f, dim=-1)
         z2_sum = z2_sum + z.pow(2).sum()
         z_count += z.numel()
     loss = elbo_sum / n_masked.clamp_min(1.0)
@@ -133,9 +135,15 @@ def _base_model(model):
 
 def save_checkpoint(path: str, model, opt_muon, opt_adamw, step: int, cfg,
                     rng: np.random.Generator, include_optimizer: bool = True,
-                    extra: Optional[dict] = None):
+                    extra: Optional[dict] = None, model_dtype: torch.dtype | None = None):
+    model_state = _to_cpu(_base_model(model).state_dict())
+    if model_dtype is not None:
+        model_state = {
+            k: (v.to(model_dtype) if torch.is_floating_point(v) else v)
+            for k, v in model_state.items()
+        }
     state = {
-        "model": _to_cpu(_base_model(model).state_dict()),
+        "model": model_state,
         "model_config": cfg.to_dict(),
         "layout": cfg.layout,
         "step": int(step),
@@ -382,19 +390,23 @@ def train(args) -> Dict:
                             include_optimizer=True, extra={"losses": losses[-20:]})
             last_save = time.time()
             print(f"[ckpt] saved {latest_path}", flush=True)
-            upload_latest(latest_path, hf_repo_id, "ckpt_latest.pt")
+            if not args.no_upload:
+                upload_latest(latest_path, hf_repo_id, "ckpt_latest.pt")
 
     # Final full resumable checkpoint is the handoff point for the next leg.
     save_checkpoint(latest_path, model, opt_muon, opt_adamw, total_steps, cfg, rng,
                     include_optimizer=True, extra={"losses": losses[-20:]})
-    upload_latest(latest_path, hf_repo_id, "ckpt_latest.pt")
+    if not args.no_upload:
+        upload_latest(latest_path, hf_repo_id, "ckpt_latest.pt")
     print(f"[ckpt] wrote final {latest_path} (resume handoff)", flush=True)
 
     # Weights-only final artifact for deployment.
     final_path = os.path.join(out_dir, "ckpt_final.pt")
     save_checkpoint(final_path, model, opt_muon, opt_adamw, total_steps, cfg, rng,
-                    include_optimizer=False, extra={"losses": losses[-20:]})
-    upload_latest(final_path, hf_repo_id, "ckpt_final.pt")
+                    include_optimizer=False, extra={"losses": losses[-20:]},
+                    model_dtype=torch.bfloat16)
+    if not args.no_upload:
+        upload_latest(final_path, hf_repo_id, "ckpt_final.pt")
     print(f"[ckpt] wrote {final_path}", flush=True)
     summary = {
         "config": args.config,
@@ -410,6 +422,7 @@ def train(args) -> Dict:
         "loss_last": losses[-1] if losses else None,
         "losses": losses,
         "final": final_path,
+        "final_dtype": "bfloat16",
         "latest": latest_path if os.path.exists(latest_path) else None,
     }
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
@@ -438,6 +451,8 @@ def main():
                     help="disable torchao FP8 for A/B testing")
     ap.add_argument("--profile-step", dest="profile_step", action="store_true",
                     help="profile Step 2 fwd+bwd for the first 2 micro-batches")
+    ap.add_argument("--no-upload", dest="no_upload", action="store_true",
+                    help="skip Hugging Face checkpoint uploads for profiling runs")
     ap.add_argument("--no_compile", action="store_true")
     ap.add_argument("--device", default=None)
     args = ap.parse_args()

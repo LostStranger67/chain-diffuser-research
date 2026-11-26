@@ -7,12 +7,13 @@ import sys
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from passchain.config import DiffConfig, LAYOUTS
 from passchain.masking import batch_to_torch, block_diffusion_block_mask, build_sequence_batch
-from passchain.model import DiffusionTransformer, MoEFFN
+from passchain.model import DiffusionTransformer, MoEFFN, _dispatch_grouped
 from passchain.optim import Muon, assert_optimizer_coverage, build_param_groups, wsd_lr, zeropower_via_newtonschulz5
 from passchain.precision import _fp8_module_filter, enable_fp8, fp8_available
 from passchain.training import load_yaml_config, masked_ce, train_step
@@ -152,6 +153,54 @@ def test_fp8_module_filter():
     assert _fp8_module_filter(nn.Linear(15, 32), "layer.q_proj") is False
     assert _fp8_module_filter(nn.Linear(16, 32), "lm_head") is False
     assert _fp8_module_filter(nn.Linear(16, 32), "layers.1.ffn.router_w") is False
+
+
+def _old_grouped_index_add(xf, top_idx, top_w, wg, wd):
+    n, d = xf.shape
+    k = top_idx.shape[1]
+    flat = top_idx.reshape(-1)
+    order = torch.argsort(flat, stable=True)
+    counts = torch.zeros(wg.shape[0], dtype=torch.int64, device=xf.device)
+    counts.scatter_add_(0, flat, torch.ones_like(flat))
+    offs = counts.cumsum(0).to(torch.int32)
+    tok = (order // k).to(torch.long)
+    xe = xf.index_select(0, tok)
+    gu = torch._grouped_mm(xe, wg, offs=offs)
+    g, u = gu.chunk(2, dim=-1)
+    oe = torch._grouped_mm(F.silu(g) * u, wd, offs=offs)
+    w_sorted = top_w.reshape(-1).index_select(0, order).to(oe.dtype).unsqueeze(-1)
+    routed = torch.zeros(n, xf.shape[1], device=xf.device, dtype=oe.dtype).index_add(
+        0, tok, oe * w_sorted
+    )
+    return routed
+
+
+def test_bijective_unpermute_matches_index_add():
+    """Forward and dX/dWeights must match the old atomic index_add path."""
+    import torch.nn.functional as F
+
+    torch.manual_seed(11)
+    N, k, D, E, Fd = 8, 2, 8, 4, 8
+    xf = torch.randn(N, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    wg = torch.randn(E, D, 2 * Fd, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    wd = torch.randn(E, Fd, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    top_idx = torch.randint(0, E, (N, k), device="cuda")
+    top_w = torch.softmax(torch.randn(N, k, device="cuda"), dim=-1)
+
+    x2 = xf.detach().clone().requires_grad_(True)
+    wg2 = wg.detach().clone().requires_grad_(True)
+    wd2 = wd.detach().clone().requires_grad_(True)
+
+    new, _, _ = _dispatch_grouped(xf, top_idx, top_w, wg, wd)
+    old = _old_grouped_index_add(x2, top_idx, top_w, wg2, wd2)
+    loss_new = new.float().pow(2).mean()
+    loss_old = old.float().pow(2).mean()
+    gx, gw, gwd = torch.autograd.grad(loss_new, (xf, wg, wd))
+    gx2, gw2, gwd2 = torch.autograd.grad(loss_old, (x2, wg2, wd2))
+    assert torch.allclose(new.float(), old.float(), rtol=2e-2, atol=2e-2)
+    assert torch.allclose(gx.float(), gx2.float(), rtol=3e-2, atol=3e-2)
+    assert torch.allclose(gw.float(), gw2.float(), rtol=3e-2, atol=3e-2)
+    assert torch.allclose(gwd.float(), gwd2.float(), rtol=3e-2, atol=3e-2)
 
 
 def test_chunked_ce_matches_full():

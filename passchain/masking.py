@@ -134,9 +134,9 @@ def block_diffusion_block_mask(cfg: DiffConfig, device: torch.device):
     Noisy block b   : keys = clean blocks 0..b-1      (never clean block b)
                         + own noisy block b           (bidirectional within b)
 
-    ``separate_full_blocks=False`` is essential: the mask is not monotone at
-    the 128-token kernel block granularity (our blocks are 64 tokens), so every
-    partial kernel block must evaluate mask_mod elementwise for exactness.
+    FlexAttention currently requires a 128-token kernel block on this stack;
+    the 64-token diffusion block is therefore handled elementwise via
+    ``separate_full_blocks=False``.  Keep BLOCK_SIZE=128 for kernel validity.
     """
     import inspect
 
