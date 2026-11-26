@@ -15,7 +15,7 @@ from passchain.masking import batch_to_torch, block_diffusion_block_mask, build_
 from passchain.model import DiffusionTransformer, MoEFFN
 from passchain.optim import Muon, assert_optimizer_coverage, build_param_groups, wsd_lr, zeropower_via_newtonschulz5
 from passchain.precision import _fp8_module_filter, enable_fp8, fp8_available
-from passchain.training import load_yaml_config, train_step
+from passchain.training import load_yaml_config, masked_ce, train_step
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -152,6 +152,54 @@ def test_fp8_module_filter():
     assert _fp8_module_filter(nn.Linear(15, 32), "layer.q_proj") is False
     assert _fp8_module_filter(nn.Linear(16, 32), "lm_head") is False
     assert _fp8_module_filter(nn.Linear(16, 32), "layers.1.ffn.router_w") is False
+
+
+def test_chunked_ce_matches_full():
+    import torch.nn.functional as F
+
+    torch.manual_seed(7)
+    B, S, D, V = 2, 8, 16, 64
+    h = torch.randn(B, S, D, dtype=torch.bfloat16)
+    w = torch.randn(V, D, dtype=torch.bfloat16)
+    tgt = torch.randint(0, V, (B, S))
+    mask = torch.rand(B, S) < 0.6
+    mask[0, 0] = True
+    t = torch.rand(B, S) * 0.9 + 0.05
+    phase = torch.zeros(B, S, dtype=torch.long)
+
+    def reference(chunk):
+        # Same math as masked_ce, explicitly materializing one chunk at a time.
+        hf = h.reshape(-1, D)
+        tf = tgt.reshape(-1)
+        mf = mask.reshape(-1).float()
+        tt = t.reshape(-1).float().clamp_min(0.05)
+        ph = phase.reshape(-1)
+        ce_sum = hf.new_zeros((), dtype=torch.float32)
+        elbo_sum = hf.new_zeros((), dtype=torch.float32)
+        z2 = hf.new_zeros((), dtype=torch.float32)
+        for s0 in range(0, hf.shape[0], chunk):
+            s1 = min(s0 + chunk, hf.shape[0])
+            logits = F.linear(hf[s0:s1], w)
+            ce = F.cross_entropy(logits.float(), tf[s0:s1], reduction="none")
+            ce_m = ce * mf[s0:s1]
+            ce_sum = ce_sum + ce_m.sum()
+            elbo_sum = elbo_sum + (ce_m / tt[s0:s1]).sum()
+            z2 = z2 + torch.logsumexp(logits.float(), dim=-1).pow(2).sum()
+        return ce_sum, elbo_sum, z2
+
+    full = masked_ce(h, w, tgt, mask, t, phase, chunk=128)
+    small = masked_ce(h, w, tgt, mask, t, phase, chunk=3)
+    ref_ce, ref_elbo, ref_z2 = reference(128)
+    for got, ref, name in (
+        (full[1], ref_ce, "full ce_sum"),
+        (full[2], ref_elbo, "full elbo_sum"),
+        (full[7], ref_z2, "full z2"),
+        (small[1], ref_ce, "small ce_sum"),
+        (small[2], ref_elbo, "small elbo_sum"),
+        (small[7], ref_z2, "small z2"),
+    ):
+        assert torch.allclose(got.float(), ref.float(), rtol=2e-2, atol=2e-2), (name, got, ref)
+    assert torch.allclose(full[0].float(), small[0].float(), rtol=2e-2, atol=2e-2)
 
 
 def test_wsd_schedule_math():

@@ -212,6 +212,7 @@ def train(args) -> Dict:
     # Warmup is anchored to the configured stable-phase length, so a short
     # benchmark does not silently collapse it to a single step.
     warmup_steps = max(1, int(round(config_total_steps * warmup_frac)))
+    lm_chunk = int(train_cfg.get("lm_chunk_tokens", 512))
 
     print(f"[train] layout={cfg.layout} seq_len={seq_len} context={cfg.context_len} "
           f"global_batch={global_batch} micro={micro_batch} accum={accum} "
@@ -224,7 +225,9 @@ def train(args) -> Dict:
     model = DiffusionTransformer(cfg).to(device)
     total_p, active_p = model.num_params()
     print(f"[train] actual params total={total_p/1e6:.2f}M active/token={active_p/1e6:.2f}M", flush=True)
-    fp8_enabled = enable_fp8(model, enabled=bool(cfg.fp8))
+    fp8_enabled = enable_fp8(model, enabled=bool(cfg.fp8) and not args.no_fp8)
+    if args.no_fp8:
+        print("[precision] --no-fp8 requested; keeping all linears in BF16", flush=True)
 
     lr_muon = float(train_cfg.get("lr_muon", 0.02))
     lr_adamw = float(train_cfg.get("lr_adamw", 3e-4))
@@ -306,16 +309,41 @@ def train(args) -> Dict:
         ce_sum_g = torch.zeros((), device=device)
         z_sum_g = torch.zeros((), device=device)
         drop_max = 0.0
-        for d in micro:
-            n_m = int(d["mask"].sum().item())
-            scale = float(n_m) / max(n_masked_global, 1)
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=(device.type == "cuda")):
-                out = train_step(model, cfg, d, block_mask, ce_chunk=2048)
-            (out["loss"] * scale).backward()
-            ce_sum_g += out["ce_loss"].detach() * scale
-            z_sum_g += out["z_loss"].detach() * scale
-            counts_total += out["counts"].detach().float()
-            drop_max = max(drop_max, float(out["drop"].detach()))
+
+        def run_micros(items):
+            nonlocal ce_sum_g, z_sum_g, drop_max
+            for d in items:
+                n_m = int(d["mask"].sum().item())
+                scale = float(n_m) / max(n_masked_global, 1)
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=(device.type == "cuda")):
+                    out = train_step(model, cfg, d, block_mask, ce_chunk=lm_chunk)
+                (out["loss"] * scale).backward()
+                ce_sum_g = ce_sum_g + out["ce_loss"].detach() * scale
+                z_sum_g = z_sum_g + out["z_loss"].detach() * scale
+                counts_total.add_(out["counts"].detach().float())
+                drop_max = max(drop_max, float(out["drop"].detach()))
+
+        if args.profile_step and step == 1 and device.type == "cuda":
+            from torch.profiler import ProfilerActivity, profile
+
+            print("[profile] profiling Step 2, first 2 micro-batches (fwd+bwd)", flush=True)
+            torch.cuda.synchronize()
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+                run_micros(micro[:2])
+            torch.cuda.synchronize()
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20), flush=True)
+            def _self_cuda_us(evt):
+                # PyTorch 2.13 renamed this to self_device_time_total; support both.
+                return getattr(evt, "self_cuda_time_total",
+                               getattr(evt, "self_device_time_total", 0.0))
+
+            for evt in sorted(prof.key_averages(), key=_self_cuda_us, reverse=True)[:20]:
+                print(f"[profile] self_cuda_time_total={_self_cuda_us(evt)/1000:.3f} ms  {evt.key}", flush=True)
+            run_micros(micro[2:])
+        else:
+            if args.profile_step and step == 1 and device.type != "cuda":
+                print("[profile] skipped: CUDA is not available", flush=True)
+            run_micros(micro)
 
         if do_log and device.type == "cuda":
             torch.cuda.synchronize()
@@ -356,7 +384,13 @@ def train(args) -> Dict:
             print(f"[ckpt] saved {latest_path}", flush=True)
             upload_latest(latest_path, hf_repo_id, "ckpt_latest.pt")
 
-    # final weights-only checkpoint + HF push
+    # Final full resumable checkpoint is the handoff point for the next leg.
+    save_checkpoint(latest_path, model, opt_muon, opt_adamw, total_steps, cfg, rng,
+                    include_optimizer=True, extra={"losses": losses[-20:]})
+    upload_latest(latest_path, hf_repo_id, "ckpt_latest.pt")
+    print(f"[ckpt] wrote final {latest_path} (resume handoff)", flush=True)
+
+    # Weights-only final artifact for deployment.
     final_path = os.path.join(out_dir, "ckpt_final.pt")
     save_checkpoint(final_path, model, opt_muon, opt_adamw, total_steps, cfg, rng,
                     include_optimizer=False, extra={"losses": losses[-20:]})
@@ -400,6 +434,10 @@ def main():
                     help="log every N steps (overrides config log_interval; use 1 for benchmarks)")
     ap.add_argument("--no-resume", dest="no_resume", action="store_true",
                     help="ignore ckpt_latest/HF resume and start at step 0")
+    ap.add_argument("--no-fp8", dest="no_fp8", action="store_true",
+                    help="disable torchao FP8 for A/B testing")
+    ap.add_argument("--profile-step", dest="profile_step", action="store_true",
+                    help="profile Step 2 fwd+bwd for the first 2 micro-batches")
     ap.add_argument("--no_compile", action="store_true")
     ap.add_argument("--device", default=None)
     args = ap.parse_args()

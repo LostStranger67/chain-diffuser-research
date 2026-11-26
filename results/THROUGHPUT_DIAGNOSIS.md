@@ -57,5 +57,18 @@ modal run modal_train.py --phase stable --steps 5 --micro-batch 16 \
   --no-resume --log-every 1
 ```
 
-and the per-step `fwd_bwd_s` / `opt_s` counters.  No B200 post-fix numbers are
-claimed here.
+and the per-step `fwd_bwd_s` / `opt_s` counters.  The pre-fix baseline was
+51.3 s/step; the post-fix measurement is below.
+
+## Post-fix B200 dry run
+
+After the combined dispatch + graph-break fix, a 5-step B200 run reported:
+
+- **23.12 s/step** (45.4k tok/s), down from 51.3 s
+- `opt_s = 0.185 s` (0.8%)
+- `fwd_bwd_s = 22.935 s` (99.2%)
+- ~358 ms per micro-batch at micro-batch 8
+
+This still leaves substantial headroom. Use `--profile-step` on the next B200
+run to identify the top CUDA kernels; the training loss is now chunked over
+sequence tokens (`lm_chunk_tokens`) and `--no-fp8` is available for an A/B test.

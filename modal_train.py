@@ -246,7 +246,8 @@ def prepare_data(train_tokens: int = 17_000_000_000, num_proc: int = 8, force: b
     volumes={"/data": volume},
 )
 def train(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICRO_BATCH,
-          no_resume: bool = False, log_every: int = 0):
+          no_resume: bool = False, log_every: int = 0, no_fp8: bool = False,
+          profile_step: bool = False):
     import subprocess
 
     os.environ.setdefault("HF_REPO_ID", DEFAULT_HF_REPO_ID)
@@ -272,6 +273,10 @@ def train(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICR
         cmd += ["--no-resume"]
     if log_every:
         cmd += ["--log-every", str(log_every)]
+    if no_fp8:
+        cmd += ["--no-fp8"]
+    if profile_step:
+        cmd += ["--profile-step"]
     print("[modal] running:", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
     print("[modal] finished; ckpt_final.pt was pushed to Hugging Face", flush=True)
@@ -279,5 +284,6 @@ def train(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICR
 
 @app.local_entrypoint()
 def main(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICRO_BATCH,
-         no_resume: bool = False, log_every: int = 0):
-    train.remote(phase, steps, micro_batch, no_resume, log_every)
+         no_resume: bool = False, log_every: int = 0, no_fp8: bool = False,
+         profile_step: bool = False):
+    train.remote(phase, steps, micro_batch, no_resume, log_every, no_fp8, profile_step)
