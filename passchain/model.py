@@ -104,6 +104,12 @@ class Attention(nn.Module):
 # ---------------------------------------------------------------------------
 # MoE with phase-specific expert pool slices
 # ---------------------------------------------------------------------------
+def _histogram(flat: torch.Tensor, n: int) -> torch.Tensor:
+    """Fixed-shape counts (torch.compile-friendly; bincount breaks dynamo)."""
+    counts = torch.zeros(n, dtype=torch.int64, device=flat.device)
+    return counts.scatter_add_(0, flat, torch.ones_like(flat))
+
+
 def _dispatch_padded(xf, top_idx, top_w, wg, wd, cap_factor=1.25):
     """Capacity-padded batched GEMM over 16 experts (dropless in practice).
 
@@ -115,7 +121,7 @@ def _dispatch_padded(xf, top_idx, top_w, wg, wd, cap_factor=1.25):
     E = wg.shape[0]
     flat = top_idx.reshape(-1)
     order = torch.argsort(flat, stable=True)
-    counts = torch.bincount(flat, minlength=E)
+    counts = _histogram(flat, E)
     tok = (order // k).to(torch.long)
     e_sorted = flat.index_select(0, order)
     mean = float(n * k) / E
@@ -148,7 +154,7 @@ def _dispatch_grouped(xf, top_idx, top_w, wg, wd):
     k = top_idx.shape[1]
     flat = top_idx.reshape(-1)
     order = torch.argsort(flat, stable=True)
-    counts = torch.bincount(flat, minlength=wg.shape[0])
+    counts = _histogram(flat, wg.shape[0])
     offs = counts.cumsum(0).to(torch.int32)
     tok = (order // k).to(torch.long)
     xe = xf.index_select(0, tok)
@@ -231,15 +237,62 @@ class MoEFFN(nn.Module):
         phase_flat = phase_ids.reshape(-1)
         for p in range(self.n_phases):
             m = phase_flat == p
-            counts[p] = torch.bincount(
-                top_idx[m].reshape(-1), minlength=self.n_experts_full
+            counts[p] = _histogram(
+                top_idx[m].reshape(-1), self.n_experts_full
             ).float()
         z_loss = z.logsumexp(dim=-1).pow(2).mean()
         return y, counts, drop, z_loss
 
+    def _forward_window_combined(self, x, phase_ids, order, inv_order, phase_sizes, pool_wg, pool_wd):
+        """PassChain fast path: one 40-group dispatch per layer, not four.
+
+        The four phase routers still run independently, but their local top-k
+        assignments are written into one phase-major (N, k) index tensor.  A
+        single grouped GEMM over the layer's 40-expert pool replaces four
+        separate 16-expert grouped GEMMs.
+        """
+        B, T, D = x.shape
+        N = B * T
+        xf = x.reshape(N, D)
+        hs = xf.index_select(0, order)
+        top_idx_all = torch.empty((N, self.top_k), dtype=torch.long, device=xf.device)
+        top_w_all = torch.empty((N, self.top_k), dtype=xf.dtype, device=xf.device)
+        all_counts = []
+        z_losses = []
+        start = 0
+        for p in range(self.n_phases):
+            n_p = phase_sizes[p]
+            end = start + n_p
+            h_p = hs[start:end]
+            z = h_p.float() @ self.router_w[p].t()
+            probs = torch.softmax(z, dim=-1)
+            sel = z + self.bias[p]
+            top_idx = torch.topk(sel, self.top_k, dim=-1).indices
+            top_w = torch.gather(probs, -1, top_idx)
+            top_w = top_w / top_w.sum(-1, keepdim=True).clamp_min(1e-9)
+            top_idx_all[start:end] = top_idx
+            top_w_all[start:end] = top_w.to(xf.dtype)
+            all_counts.append(_histogram(top_idx.reshape(-1), self.n_experts))
+            z_losses.append(z.logsumexp(dim=-1).pow(2).mean())
+            start = end
+        # Full 40-expert pool for this independent layer.
+        wg, wd = pool_wg[self.layer_idx], pool_wd[self.layer_idx]
+        routed_sorted, _, drop = self._dispatch(hs, top_idx_all, top_w_all, wg, wd)
+        routed = routed_sorted.index_select(0, inv_order).view(B, T, D)
+        return (
+            routed + self.shared(x),
+            torch.stack(all_counts),
+            drop,
+            torch.stack(z_losses).mean(),
+        )
+
     def forward(self, x, phase_ids, order, inv_order, phase_sizes, pool_wg, pool_wd):
         if self.router_mode == "full40":
             return self._forward_full(x, phase_ids, pool_wg, pool_wd)
+        if self.router_mode == "window40" and self.cfg.spec.kind == "independent_layers":
+            return self._forward_window_combined(
+                x, phase_ids, order, inv_order, phase_sizes, pool_wg, pool_wd
+            )
         B, T, D = x.shape
         N = B * T
         xf = x.reshape(N, D)

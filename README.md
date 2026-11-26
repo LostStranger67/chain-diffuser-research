@@ -54,6 +54,9 @@ attention, and embeddings bring the total active count to ~604M.
 the global batch at 512 sequences.  The config defaults to **8** (96 GB cards);
 the B200 launcher defaults to **16**.
 
+For throughput benchmarks use `--log-every 1 --no-resume`; each line reports
+`step_s`, `fwd_bwd_s`, `opt_s`, and `tok/s`.
+
 ## Quickstart
 
 ```bash
@@ -123,6 +126,7 @@ python scripts/train.py \
   --phase stable \
   --steps 6676 \
   --micro-batch 8 \
+  --no-resume \
   --data_dir /data/python_mix \
   --out_dir runs/leg1
 ```
@@ -174,6 +178,8 @@ export HF_TOKEN=...
 
 Public shard dataset:
 `https://huggingface.co/datasets/LostStranger67/passchain-python-shards`.
+
+Throughput audit: [`results/THROUGHPUT_DIAGNOSIS.md`](results/THROUGHPUT_DIAGNOSIS.md).
 
 Model checkpoints:
 `https://huggingface.co/LostStranger67/chain-diffuser`.

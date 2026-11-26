@@ -202,12 +202,16 @@ def train(args) -> Dict:
     accum = global_batch // micro_batch
     tokens_per_step = global_batch * seq_len
     total_tokens = int(train_cfg.get("total_tokens", 17_000_000_000))
-    total_steps = int(math.ceil(total_tokens / tokens_per_step))
+    config_total_steps = int(math.ceil(total_tokens / tokens_per_step))
+    total_steps = config_total_steps
     if args.steps:
         total_steps = int(args.steps)
     phase = train_cfg.get("phase", "stable")
     warmup_frac = float(train_cfg.get("warmup_frac", 0.02))
     decay_frac = float(train_cfg.get("decay_frac", 0.15))
+    # Warmup is anchored to the configured stable-phase length, so a short
+    # benchmark does not silently collapse it to a single step.
+    warmup_steps = max(1, int(round(config_total_steps * warmup_frac)))
 
     print(f"[train] layout={cfg.layout} seq_len={seq_len} context={cfg.context_len} "
           f"global_batch={global_batch} micro={micro_batch} accum={accum} "
@@ -258,8 +262,8 @@ def train(args) -> Dict:
     rng = np.random.default_rng(seed + 10_000)
     start_step = 0
     latest_path = os.path.join(out_dir, "ckpt_latest.pt")
-    resume_path = args.resume_from
-    if args.resume_from_hf:
+    resume_path = None if args.no_resume else args.resume_from
+    if args.resume_from_hf and not args.no_resume:
         resume_path = download_latest(out_dir, hf_repo_id)
     if resume_path and os.path.exists(resume_path):
         start_step, _ = load_checkpoint(resume_path, model, opt_muon, opt_adamw, device)
@@ -268,15 +272,21 @@ def train(args) -> Dict:
     save_every_steps = int(train_cfg.get("save_every_steps", 0) or 0)
     save_every_min = float(train_cfg.get("save_every_minutes", 30) or 0)
     last_save = time.time()
-    log_interval = int(args.log_interval or train_cfg.get("log_interval", 10))
+    log_interval = int(args.log_every or args.log_interval or train_cfg.get("log_interval", 10))
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
     bias_gamma = float(cfg.bias_gamma)
     losses: List[float] = []
     t0 = time.time()
 
     for step in range(start_step, total_steps):
-        cur_muon_lr = wsd_lr(step, total_steps, lr_muon, warmup_frac, decay_frac, phase)
-        cur_adamw_lr = wsd_lr(step, total_steps, lr_adamw, warmup_frac, decay_frac, phase)
+        do_log = (step % log_interval == 0) or (step == total_steps - 1)
+        if do_log and device.type == "cuda":
+            torch.cuda.synchronize()
+        t_step = time.perf_counter()
+        cur_muon_lr = wsd_lr(step, total_steps, lr_muon, warmup_frac, decay_frac, phase,
+                             warmup_steps=warmup_steps)
+        cur_adamw_lr = wsd_lr(step, total_steps, lr_adamw, warmup_frac, decay_frac, phase,
+                              warmup_steps=warmup_steps)
         for g in opt_muon.param_groups:
             g["lr"] = cur_muon_lr
         for g in opt_adamw.param_groups:
@@ -307,6 +317,10 @@ def train(args) -> Dict:
             counts_total += out["counts"].detach().float()
             drop_max = max(drop_max, float(out["drop"].detach()))
 
+        if do_log and device.type == "cuda":
+            torch.cuda.synchronize()
+        fwd_bwd_s = time.perf_counter() - t_step
+        t_opt = time.perf_counter()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         opt_muon.step()
         opt_adamw.step()
@@ -316,15 +330,21 @@ def train(args) -> Dict:
             model._orig_mod.update_bias(list(counts_total), bias_gamma)
         else:
             model.update_bias(list(counts_total), bias_gamma)
+        if do_log and device.type == "cuda":
+            torch.cuda.synchronize()
+        opt_s = time.perf_counter() - t_opt
+        step_s = time.perf_counter() - t_step
+        tok_s = tokens_per_step / max(step_s, 1e-9)
 
         loss_val = float((ce_sum_g + z_sum_g).detach())
         losses.append(loss_val)
-        if step % log_interval == 0 or step == total_steps - 1:
+        if do_log:
             elapsed = time.time() - t0
             print(f"[train] step {step+1}/{total_steps} lr_muon={cur_muon_lr:.3e} "
                   f"lr_adamw={cur_adamw_lr:.3e} ce={float(ce_sum_g):.4f} "
                   f"z={float(z_sum_g):.4f} loss={loss_val:.4f} drop={drop_max:.4f} "
-                  f"elapsed={elapsed/60:.1f}m", flush=True)
+                  f"step_s={step_s:.3f} fwd_bwd_s={fwd_bwd_s:.3f} opt_s={opt_s:.3f} "
+                  f"tok/s={tok_s:,.0f} elapsed={elapsed/60:.1f}m", flush=True)
 
         do_save = (save_every_steps and (step + 1) % save_every_steps == 0)
         if save_every_min and (time.time() - last_save) >= save_every_min * 60:
@@ -376,6 +396,10 @@ def main():
     ap.add_argument("--micro-batch", dest="micro_batch", type=int, default=0,
                     help="override config micro_batch; grad_accum is recomputed from global_batch")
     ap.add_argument("--log_interval", type=int, default=0)
+    ap.add_argument("--log-every", dest="log_every", type=int, default=0,
+                    help="log every N steps (overrides config log_interval; use 1 for benchmarks)")
+    ap.add_argument("--no-resume", dest="no_resume", action="store_true",
+                    help="ignore ckpt_latest/HF resume and start at step 0")
     ap.add_argument("--no_compile", action="store_true")
     ap.add_argument("--device", default=None)
     args = ap.parse_args()

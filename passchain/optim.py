@@ -142,7 +142,7 @@ def assert_optimizer_coverage(model: torch.nn.Module, optimizers, label: str = "
 
 def wsd_lr(step: int, total_steps: int, peak_lr: float,
            warmup_frac: float = 0.02, decay_frac: float = 0.15,
-           phase: str = "stable") -> float:
+           phase: str = "stable", warmup_steps: int | None = None) -> float:
     """Warmup-Stable-Decay schedule.
 
     stable: linear warmup for ``warmup_frac`` then constant peak LR.
@@ -153,7 +153,10 @@ def wsd_lr(step: int, total_steps: int, peak_lr: float,
         raise ValueError(f"phase must be 'stable' or 'decay', got {phase!r}")
     total_steps = max(1, int(total_steps))
     step = max(0, int(step))
-    warmup = max(1, int(round(total_steps * warmup_frac)))
+    if warmup_steps is not None:
+        warmup = max(1, int(warmup_steps))
+    else:
+        warmup = max(1, int(round(total_steps * warmup_frac)))
     if step < warmup:
         return peak_lr * float(step + 1) / float(warmup)
     if phase == "stable":

@@ -9,11 +9,11 @@ Status: `TODO` / `RUNNING` / `DONE`. Update only the row you own.
 | Job | Base pretraining |
 | Tokens | 0 → 7B |
 | Config | `configs/passchain_3b_python.yaml` |
-| Schedule | WSD **stable** (2% warmup, constant peak LR) |
+| Schedule | WSD **stable** (2% warmup anchored to configured stable steps, constant peak LR) |
 | Checkpointing | `ckpt_latest.pt` every 30 min → `LostStranger67/chain-diffuser` |
 | Data | CPU prep once: `modal run modal_train.py::prepare_data --train-tokens 17000000000` → `LostStranger67/passchain-python-shards` and Modal Volume |
 | Status | **TODO** |
-| Notes | 3.0B total / ~400M routed-active PassChain-40; Python-heavy mix; `--micro-batch 8` on 96 GB |
+| Notes | Fresh start with `--no-resume`; 3.0B total / ~400M routed-active PassChain-40; Python-heavy mix; `--micro-batch 8` on 96 GB |
 
 ## Leg 2 — Modal B200 (192 GB)
 

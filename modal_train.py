@@ -27,6 +27,7 @@ image = (
         "PIP_BREAK_SYSTEM_PACKAGES": "1",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "PYTHONUNBUFFERED": "1",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     })
     .apt_install("git")
     .pip_install(
@@ -244,7 +245,8 @@ def prepare_data(train_tokens: int = 17_000_000_000, num_proc: int = 8, force: b
     secrets=[hf_secret],
     volumes={"/data": volume},
 )
-def train(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICRO_BATCH):
+def train(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICRO_BATCH,
+          no_resume: bool = False):
     import subprocess
 
     os.environ.setdefault("HF_REPO_ID", DEFAULT_HF_REPO_ID)
@@ -266,11 +268,14 @@ def train(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICR
     ]
     if steps:
         cmd += ["--steps", str(steps)]
+    if no_resume:
+        cmd += ["--no-resume"]
     print("[modal] running:", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
     print("[modal] finished; ckpt_final.pt was pushed to Hugging Face", flush=True)
 
 
 @app.local_entrypoint()
-def main(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICRO_BATCH):
-    train.remote(phase, steps, micro_batch)
+def main(phase: str = "stable", steps: int = 0, micro_batch: int = DEFAULT_MICRO_BATCH,
+         no_resume: bool = False):
+    train.remote(phase, steps, micro_batch, no_resume)

@@ -165,6 +165,9 @@ def test_wsd_schedule_math():
     assert abs(wsd_lr(total - 1, total, peak, 0.02, 0.15, "decay")) < 1e-9
     vals = [wsd_lr(s, total, peak, 0.02, 0.15, "decay") for s in range(decay_start, total)]
     assert all(vals[i] >= vals[i + 1] - 1e-12 for i in range(len(vals) - 1))
+    # A 5-step benchmark must still use the configured stable-phase warmup.
+    assert abs(wsd_lr(0, 5, peak, warmup_steps=100) - peak / 100) < 1e-9
+    assert wsd_lr(0, 5, peak, warmup_steps=100) > 0
     with pytest.raises(ValueError):
         wsd_lr(0, total, peak, phase="bogus")
 
@@ -181,3 +184,14 @@ def test_orthogonalization_shape():
     x = zeropower_via_newtonschulz5(g, steps=3)
     assert x.shape == g.shape and torch.isfinite(x).all()
     assert x.dtype == g.dtype
+
+
+def test_muon_batches_4d_expert_tensor():
+    # 2 experts x 3 x 8 x 4 simulates a batched expert-pool parameter.
+    p = torch.nn.Parameter(torch.randn(2, 3, 8, 4))
+    p.grad = torch.randn_like(p)
+    before = p.detach().clone()
+    Muon([p], lr=0.01).step()
+    assert p.shape == before.shape
+    assert torch.isfinite(p).all()
+    assert not torch.equal(p, before)
